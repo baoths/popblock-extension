@@ -51,6 +51,4 @@ node tests/background.test.js
 
 All settings and stats are stored locally using chrome.storage. No data is sent anywhere.
 
-## License
 
-Add a LICENSE file if you plan to open-source this project.
