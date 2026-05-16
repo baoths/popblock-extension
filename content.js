@@ -48,7 +48,7 @@
   // Block:  ad domain URLs, script-triggered popups with no gesture
   const _originalOpen = window.open.bind(window);
   window.open = function (url, target, features) {
-    if (!shouldBlock()) return _originalOpen(url, target, features);
+    if (!enabled) return _originalOpen(url, target, features);
 
     if (target === '_self' || target === '_parent' || target === '_top') {
       return _originalOpen(url, target, features);
@@ -60,11 +60,14 @@
       return null;
     }
 
+    const allowEntry = findAllowEntryForHost(location.hostname || '');
+    const targetHost = getHostnameFromUrl(url);
+    const allowSameSite = allowEntry && (!targetHost || isHostCoveredByEntry(targetHost, allowEntry));
+    if (allowSameSite) return _originalOpen(url, target, features);
+
     const timeout = GESTURE_WINDOW_MS[lastGesture.type] ?? GESTURE_WINDOW_MS.default;
     const hasGesture = (Date.now() - lastGesture.at) < timeout;
-    if (hasGesture) {
-      return _originalOpen(url, target, features);
-    }
+    if (hasGesture) return _originalOpen(url, target, features);
 
     console.debug('[PopBlock] Blocked script window.open →', url);
     chrome.runtime.sendMessage({ type: 'BLOCK_EVENT', category: 'popups' });
@@ -219,12 +222,36 @@
   }
 
   function isHostnameAllowed(hostname) {
+    return !!findAllowEntryForHost(hostname);
+  }
+
+  function findAllowEntryForHost(hostname) {
     const host = String(hostname || '').toLowerCase();
-    if (!host) return false;
-    return allowlist.some((entry) => {
+    if (!host) return '';
+    let match = '';
+    for (const entry of allowlist) {
       const allowed = String(entry || '').toLowerCase();
-      return allowed && (host === allowed || host.endsWith(`.${allowed}`));
-    });
+      if (!allowed) continue;
+      if (host === allowed || host.endsWith(`.${allowed}`)) {
+        if (allowed.length > match.length) match = allowed;
+      }
+    }
+    return match;
+  }
+
+  function isHostCoveredByEntry(hostname, entry) {
+    const host = String(hostname || '').toLowerCase();
+    const allowed = String(entry || '').toLowerCase();
+    if (!host || !allowed) return false;
+    return host === allowed || host.endsWith(`.${allowed}`);
+  }
+
+  function getHostnameFromUrl(url) {
+    try {
+      return new URL(url).hostname.toLowerCase();
+    } catch (_) {
+      return '';
+    }
   }
 
 })();

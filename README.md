@@ -29,7 +29,7 @@ Lightweight MV3 browser extension that blocks popup ads, tab hijacks, overlay ad
 - Use "Pause on this site" to allow behavior on the current hostname.
 - Stats update in the popup; the badge shows total blocks.
 
-Note: Pausing a site disables the script-based blockers for that site. The declarative net request rules still block known ad domains.
+Note: Pausing a site relaxes on-page blockers for that site, but cross-site popups without a user gesture are still blocked. The declarative net request rules still block known ad domains.
 
 ## Tests
 

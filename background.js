@@ -3,6 +3,7 @@
 let stats = { popups: 0, redirects: 0, overlays: 0, ads: 0 };
 let enabled = true;
 let allowlist = [];
+const allowlistPending = new Map(); // tabId -> { allowEntry }
 
 chrome.storage.local.get(['stats', 'enabled', 'allowlist'], (data) => {
   if (data.stats) stats = data.stats;
@@ -95,19 +96,67 @@ chrome.tabs.onCreated.addListener((tab) => {
     return;
   }
 
-  isOpenerAllowed(tab.openerTabId, (isAllowed) => {
-    if (isAllowed) return;
+  getAllowEntryForTab(tab.openerTabId, (allowEntry) => {
+    const targetHost = getHostname(url);
+    const allowSameSite = allowEntry && targetHost && isHostnameCoveredByEntry(targetHost, allowEntry);
+    const needsPending = allowEntry && !targetHost;
 
-    // Block if no valid gesture from the opener tab
-    if (consumeGestureSync(tab.openerTabId)) return;
+    if (allowSameSite) return;
+
+    if (needsPending) {
+      allowlistPending.set(tab.id, { allowEntry });
+    }
+
+    // Allow user-initiated tabs even if opener is paused.
+    if (consumeGestureSync(tab.openerTabId)) {
+      if (needsPending) allowlistPending.delete(tab.id);
+      return;
+    }
 
     // Fallback: service worker may have restarted between contextmenu and tab create.
     consumePersistedGesture(tab.openerTabId, (hasGesture) => {
-      if (hasGesture) return;
+      if (hasGesture) {
+        if (needsPending) allowlistPending.delete(tab.id);
+        return;
+      }
+
+      // If the opener is paused but the target URL is unknown yet, allow the tab
+      // and verify once the first URL lands.
+      if (needsPending) return;
+
       chrome.tabs.remove(tab.id, () => { chrome.runtime.lastError; });
       recordBlock('redirects');
     });
   });
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  const pending = allowlistPending.get(tabId);
+  if (!pending) return;
+
+  const url = changeInfo.url || tab?.url || tab?.pendingUrl || '';
+  if (!url) return;
+
+  if (AD_DOMAIN_RE.test(url)) {
+    allowlistPending.delete(tabId);
+    chrome.tabs.remove(tabId, () => { chrome.runtime.lastError; });
+    recordBlock('redirects');
+    return;
+  }
+
+  const host = getHostname(url);
+  if (isHostnameCoveredByEntry(host, pending.allowEntry)) {
+    allowlistPending.delete(tabId);
+    return;
+  }
+
+  allowlistPending.delete(tabId);
+  chrome.tabs.remove(tabId, () => { chrome.runtime.lastError; });
+  recordBlock('redirects');
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  allowlistPending.delete(tabId);
 });
 
 // ─── Message handler ──────────────────────────────────────────────────────────
@@ -155,14 +204,6 @@ function recordBlock(category) {
   chrome.action.setBadgeBackgroundColor({ color: '#e63946' });
 }
 
-function isOpenerAllowed(openerTabId, callback) {
-  chrome.tabs.get(openerTabId, (openerTab) => {
-    if (chrome.runtime.lastError) return callback(false);
-    const hostname = getHostname(openerTab?.url || openerTab?.pendingUrl || '');
-    return callback(isHostnameAllowed(hostname));
-  });
-}
-
 function getHostname(url) {
   try {
     return new URL(url).hostname.toLowerCase();
@@ -171,10 +212,35 @@ function getHostname(url) {
   }
 }
 
-function isHostnameAllowed(hostname) {
-  if (!hostname) return false;
-  return allowlist.some((entry) => {
-    const allowed = String(entry || '').toLowerCase();
-    return allowed && (hostname === allowed || hostname.endsWith(`.${allowed}`));
+function getAllowEntryForTab(openerTabId, callback) {
+  chrome.tabs.get(openerTabId, (openerTab) => {
+    if (chrome.runtime.lastError) return callback('');
+    const hostname = getHostname(openerTab?.url || openerTab?.pendingUrl || '');
+    return callback(findAllowEntryForHost(hostname));
   });
+}
+
+function findAllowEntryForHost(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  if (!host) return '';
+  let match = '';
+  for (const entry of allowlist) {
+    const allowed = String(entry || '').toLowerCase();
+    if (!allowed) continue;
+    if (host === allowed || host.endsWith(`.${allowed}`)) {
+      if (allowed.length > match.length) match = allowed;
+    }
+  }
+  return match;
+}
+
+function isHostnameCoveredByEntry(hostname, entry) {
+  const host = String(hostname || '').toLowerCase();
+  const allowed = String(entry || '').toLowerCase();
+  if (!host || !allowed) return false;
+  return host === allowed || host.endsWith(`.${allowed}`);
+}
+
+function isHostnameAllowed(hostname) {
+  return !!findAllowEntryForHost(hostname);
 }

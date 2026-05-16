@@ -68,14 +68,16 @@ class GestureTracker {
   }
 }
 
-function shouldBlockTab({ url, openerTabId, gestureTracker, enabled, openerAllowed, hasPersistedGesture }) {
+function shouldBlockTab({ url, openerTabId, gestureTracker, enabled, allowEntry, hasPersistedGesture }) {
   if (!enabled) return false;
   if (!openerTabId) return false; // Ctrl+T, bookmarks, address bar — never block
 
   // Always block known ad domains regardless of gesture
   if (url && AD_DOMAIN_RE.test(url)) return true;
 
-  if (openerAllowed) return false;
+  const targetHost = getHostnameFromUrl(url);
+  const allowSameSite = allowEntry && (!targetHost || isHostCoveredByEntry(targetHost, allowEntry));
+  if (allowSameSite) return false;
 
   // Block if no valid gesture from opener tab
   if (gestureTracker.consume(openerTabId)) return false;
@@ -90,6 +92,21 @@ function isHostnameAllowed(hostname, allowlist) {
     const allowed = String(entry || '').toLowerCase();
     return allowed && (host === allowed || host.endsWith(`.${allowed}`));
   });
+}
+
+function isHostCoveredByEntry(hostname, entry) {
+  const host = String(hostname || '').toLowerCase();
+  const allowed = String(entry || '').toLowerCase();
+  if (!host || !allowed) return false;
+  return host === allowed || host.endsWith(`.${allowed}`);
+}
+
+function getHostnameFromUrl(url) {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch (_) {
+    return '';
+  }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -179,39 +196,45 @@ group('shouldBlockTab — allow cases', () => {
   test('allow: left-click on link (click gesture present)', () => {
     const t = new GestureTracker();
     t.record(5, 'click');
-    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, openerAllowed: false, hasPersistedGesture: false });
+    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, allowEntry: '', hasPersistedGesture: false });
     expect(block).toBeFalse();
   });
 
   test('allow: right-click → open in new tab (contextmenu gesture present)', () => {
     const t = new GestureTracker();
     t.record(5, 'contextmenu');
-    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, openerAllowed: false, hasPersistedGesture: false });
+    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, allowEntry: '', hasPersistedGesture: false });
     expect(block).toBeFalse();
   });
 
   test('allow: middle-click on link (auxclick gesture present)', () => {
     const t = new GestureTracker();
     t.record(5, 'auxclick');
-    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, openerAllowed: false, hasPersistedGesture: false });
+    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, allowEntry: '', hasPersistedGesture: false });
     expect(block).toBeFalse();
   });
 
   test('allow: extension is disabled', () => {
     const t = new GestureTracker();
-    const block = shouldBlockTab({ url: 'https://ads.com', openerTabId: 5, gestureTracker: t, enabled: false, openerAllowed: false, hasPersistedGesture: false });
+    const block = shouldBlockTab({ url: 'https://ads.com', openerTabId: 5, gestureTracker: t, enabled: false, allowEntry: '', hasPersistedGesture: false });
     expect(block).toBeFalse();
   });
 
-  test('allow: opener is on allowlist (per-site pause)', () => {
+  test('allow: opener is on allowlist for same-site target', () => {
     const t = new GestureTracker();
-    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, openerAllowed: true, hasPersistedGesture: false });
+    const block = shouldBlockTab({ url: 'https://blog.example.com', openerTabId: 5, gestureTracker: t, enabled: true, allowEntry: 'example.com', hasPersistedGesture: false });
     expect(block).toBeFalse();
   });
 
   test('allow: persisted gesture fallback', () => {
     const t = new GestureTracker();
-    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, openerAllowed: false, hasPersistedGesture: true });
+    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, allowEntry: '', hasPersistedGesture: true });
+    expect(block).toBeFalse();
+  });
+
+  test('allow: allowlisted opener with unknown target (pending)', () => {
+    const t = new GestureTracker();
+    const block = shouldBlockTab({ url: '', openerTabId: 5, gestureTracker: t, enabled: true, allowEntry: 'example.com', hasPersistedGesture: false });
     expect(block).toBeFalse();
   });
 });
@@ -219,14 +242,14 @@ group('shouldBlockTab — allow cases', () => {
 group('shouldBlockTab — block cases', () => {
   test('block: tab opened by script with no user gesture', () => {
     const t = new GestureTracker();
-    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, openerAllowed: false, hasPersistedGesture: false });
+    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, allowEntry: '', hasPersistedGesture: false });
     expect(block).toBeTrue();
   });
 
   test('block: ad domain URL even with a gesture (safety net)', () => {
     const t = new GestureTracker();
     t.record(5, 'click');
-    const block = shouldBlockTab({ url: 'https://doubleclick.net/ad', openerTabId: 5, gestureTracker: t, enabled: true, openerAllowed: true, hasPersistedGesture: true });
+    const block = shouldBlockTab({ url: 'https://doubleclick.net/ad', openerTabId: 5, gestureTracker: t, enabled: true, allowEntry: 'example.com', hasPersistedGesture: true });
     expect(block).toBeTrue();
   });
 
@@ -236,65 +259,77 @@ group('shouldBlockTab — block cases', () => {
     const t = new GestureTracker(clock);
     t.record(5, 'click');
     now = 2000; // gesture expired
-    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, openerAllowed: false, hasPersistedGesture: false });
+    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, allowEntry: '', hasPersistedGesture: false });
     expect(block).toBeTrue();
   });
 
   test('block: second tab opened from same gesture (gesture consumed)', () => {
     const t = new GestureTracker();
     t.record(5, 'click');
-    shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, openerAllowed: false, hasPersistedGesture: false }); // first tab OK
-    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, openerAllowed: false, hasPersistedGesture: false }); // second = block
+    shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, allowEntry: '', hasPersistedGesture: false }); // first tab OK
+    const block = shouldBlockTab({ url: 'https://example.com', openerTabId: 5, gestureTracker: t, enabled: true, allowEntry: '', hasPersistedGesture: false }); // second = block
+    expect(block).toBeTrue();
+  });
+
+  test('block: allowlisted opener but cross-site with no gesture', () => {
+    const t = new GestureTracker();
+    const block = shouldBlockTab({ url: 'https://malicious.test', openerTabId: 5, gestureTracker: t, enabled: true, allowEntry: 'example.com', hasPersistedGesture: false });
     expect(block).toBeTrue();
   });
 });
 
 group('window.open — allow/block logic', () => {
   // Mirrors the logic in content.js window.open
-  function windowOpenShouldBlock({ target, url, lastGesture, now, enabled, siteAllowed }) {
+  function windowOpenShouldBlock({ target, url, lastGesture, now, enabled, allowEntry }) {
     if (!enabled) return false;
-    if (siteAllowed) return false;
     if (target === '_self' || target === '_parent' || target === '_top') return false;
     if (url && AD_DOMAIN_RE.test(url)) return true;
+    const targetHost = getHostnameFromUrl(url);
+    const allowSameSite = allowEntry && (!targetHost || isHostCoveredByEntry(targetHost, allowEntry));
+    if (allowSameSite) return false;
     const timeout = GESTURE_WINDOW_MS[lastGesture.type] ?? GESTURE_WINDOW_MS.default;
     const hasGesture = (now - lastGesture.at) < timeout;
     return !hasGesture;
   }
 
   test('allow: window.open _self (same tab)', () => {
-    expect(windowOpenShouldBlock({ target: '_self', url: 'https://example.com', lastGesture: { at: 0, type: 'click' }, now: 5000, enabled: true, siteAllowed: false })).toBeFalse();
+    expect(windowOpenShouldBlock({ target: '_self', url: 'https://example.com', lastGesture: { at: 0, type: 'click' }, now: 5000, enabled: true, allowEntry: '' })).toBeFalse();
   });
 
   test('block: window.open to new tab with no user gesture', () => {
-    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://example.com', lastGesture: { at: 0, type: 'click' }, now: 3000, enabled: true, siteAllowed: false })).toBeTrue();
+    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://example.com', lastGesture: { at: 0, type: 'click' }, now: 3000, enabled: true, allowEntry: '' })).toBeTrue();
   });
 
   test('allow: window.open to new tab WITH click gesture within 1500ms', () => {
-    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://accounts.google.com/oauth', lastGesture: { at: 1000, type: 'click' }, now: 2400, enabled: true, siteAllowed: false })).toBeFalse();
+    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://accounts.google.com/oauth', lastGesture: { at: 1000, type: 'click' }, now: 2400, enabled: true, allowEntry: '' })).toBeFalse();
   });
 
   test('block: window.open to ad domain even with gesture', () => {
-    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://doubleclick.net/popup', lastGesture: { at: 1000, type: 'click' }, now: 1400, enabled: true, siteAllowed: false })).toBeTrue();
+    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://doubleclick.net/popup', lastGesture: { at: 1000, type: 'click' }, now: 1400, enabled: true, allowEntry: '' })).toBeTrue();
   });
 
   test('block: window.open with expired click gesture', () => {
-    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://example.com', lastGesture: { at: 0, type: 'click' }, now: 2000, enabled: true, siteAllowed: false })).toBeTrue();
+    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://example.com', lastGesture: { at: 0, type: 'click' }, now: 2000, enabled: true, allowEntry: '' })).toBeTrue();
   });
 
   test('allow: window.open with contextmenu gesture within 8000ms', () => {
-    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://example.com', lastGesture: { at: 0, type: 'contextmenu' }, now: 7000, enabled: true, siteAllowed: false })).toBeFalse();
+    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://example.com', lastGesture: { at: 0, type: 'contextmenu' }, now: 7000, enabled: true, allowEntry: '' })).toBeFalse();
   });
 
   test('block: window.open with expired contextmenu gesture', () => {
-    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://example.com', lastGesture: { at: 0, type: 'contextmenu' }, now: 9000, enabled: true, siteAllowed: false })).toBeTrue();
+    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://example.com', lastGesture: { at: 0, type: 'contextmenu' }, now: 9000, enabled: true, allowEntry: '' })).toBeTrue();
   });
 
-  test('allow: window.open when site is paused', () => {
-    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://example.com', lastGesture: { at: 0, type: 'click' }, now: 5000, enabled: true, siteAllowed: true })).toBeFalse();
+  test('allow: window.open when site is paused and target is same-site', () => {
+    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://shop.example.com', lastGesture: { at: 0, type: 'click' }, now: 5000, enabled: true, allowEntry: 'example.com' })).toBeFalse();
+  });
+
+  test('block: window.open when site is paused but target is cross-site (no gesture)', () => {
+    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://malicious.test', lastGesture: { at: 0, type: 'click' }, now: 5000, enabled: true, allowEntry: 'example.com' })).toBeTrue();
   });
 
   test('allow: window.open when extension is disabled', () => {
-    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://example.com', lastGesture: { at: 0, type: 'click' }, now: 5000, enabled: false, siteAllowed: false })).toBeFalse();
+    expect(windowOpenShouldBlock({ target: '_blank', url: 'https://example.com', lastGesture: { at: 0, type: 'click' }, now: 5000, enabled: false, allowEntry: '' })).toBeFalse();
   });
 });
 
