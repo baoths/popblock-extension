@@ -13,9 +13,15 @@ Lightweight MV3 browser extension that blocks popup ads, tab hijacks, overlay ad
 
 ## Install (Chrome / Chromium)
 
-1. Open chrome://extensions.
-2. Enable Developer mode.
-3. Click "Load unpacked" and select this folder.
+1. Download or clone this repo to your machine.
+2. Open chrome://extensions (Edge: edge://extensions).
+3. Turn on Developer mode (top-right toggle).
+4. Click "Load unpacked".
+5. Select the folder that contains manifest.json (the root of this project).
+	- Do not select a parent folder.
+	- Do not select a subfolder like icons/ or tests/.
+6. The PopBlock card should appear in the extensions list.
+7. If you update files later, click the refresh icon on the PopBlock card to reload it.
 
 ## Usage
 
