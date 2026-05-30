@@ -109,6 +109,53 @@ function getHostnameFromUrl(url) {
   }
 }
 
+function createFakeTimer() {
+  let tasks = [];
+  let nextId = 1;
+  return {
+    setTimeout: (fn, _ms) => {
+      const id = nextId++;
+      tasks.push({ id, fn });
+      return id;
+    },
+    clearTimeout: (id) => {
+      tasks = tasks.filter((task) => task.id !== id);
+    },
+    runAll: () => {
+      const toRun = tasks;
+      tasks = [];
+      toRun.forEach((task) => task.fn());
+    },
+    pendingCount: () => tasks.length,
+  };
+}
+
+function createAdsBatcher({ flushMs = 1000, setTimeoutImpl, clearTimeoutImpl, recordCount }) {
+  let pendingAds = 0;
+  let timer = null;
+
+  function queueAdsBlock() {
+    pendingAds += 1;
+    if (timer) return;
+    timer = setTimeoutImpl(() => {
+      const count = pendingAds;
+      pendingAds = 0;
+      timer = null;
+      if (count > 0) recordCount(count);
+    }, flushMs);
+  }
+
+  function reset() {
+    pendingAds = 0;
+    if (timer) {
+      clearTimeoutImpl(timer);
+      timer = null;
+    }
+  }
+
+  return { queueAdsBlock, reset };
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 group('GestureTracker — click', () => {
@@ -330,6 +377,46 @@ group('window.open — allow/block logic', () => {
 
   test('allow: window.open when extension is disabled', () => {
     expect(windowOpenShouldBlock({ target: '_blank', url: 'https://example.com', lastGesture: { at: 0, type: 'click' }, now: 5000, enabled: false, allowEntry: '' })).toBeFalse();
+  });
+});
+
+group('DNR batching — ads counter', () => {
+  test('batches multiple ad hits into one flush', () => {
+    const timer = createFakeTimer();
+    const calls = [];
+    const batcher = createAdsBatcher({
+      flushMs: 1000,
+      setTimeoutImpl: timer.setTimeout,
+      clearTimeoutImpl: timer.clearTimeout,
+      recordCount: (count) => calls.push(count),
+    });
+
+    batcher.queueAdsBlock();
+    batcher.queueAdsBlock();
+    expect(timer.pendingCount()).toBe(1);
+    expect(calls.length).toBe(0);
+
+    timer.runAll();
+    expect(calls.length).toBe(1);
+    expect(calls[0]).toBe(2);
+  });
+
+  test('reset clears pending batch without recording', () => {
+    const timer = createFakeTimer();
+    const calls = [];
+    const batcher = createAdsBatcher({
+      flushMs: 1000,
+      setTimeoutImpl: timer.setTimeout,
+      clearTimeoutImpl: timer.clearTimeout,
+      recordCount: (count) => calls.push(count),
+    });
+
+    batcher.queueAdsBlock();
+    batcher.reset();
+    expect(timer.pendingCount()).toBe(0);
+
+    timer.runAll();
+    expect(calls.length).toBe(0);
   });
 });
 

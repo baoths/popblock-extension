@@ -4,16 +4,32 @@ let stats = { popups: 0, redirects: 0, overlays: 0, ads: 0 };
 let enabled = true;
 let allowlist = [];
 const allowlistPending = new Map(); // tabId -> { allowEntry }
+const DNR_FLUSH_MS = 1000;
+let pendingAds = 0;
+let pendingAdsTimer = null;
+
+function setRulesetEnabled(isEnabled) {
+  if (!chrome.declarativeNetRequest?.updateEnabledRulesets) return;
+  const enableRulesetIds = isEnabled ? ['ad_rules'] : [];
+  const disableRulesetIds = isEnabled ? [] : ['ad_rules'];
+  chrome.declarativeNetRequest.updateEnabledRulesets({ enableRulesetIds, disableRulesetIds }, () => {
+    chrome.runtime.lastError;
+  });
+}
 
 chrome.storage.local.get(['stats', 'enabled', 'allowlist'], (data) => {
   if (data.stats) stats = data.stats;
   if (data.enabled !== undefined) enabled = data.enabled;
   if (Array.isArray(data.allowlist)) allowlist = data.allowlist;
+  setRulesetEnabled(enabled);
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local') return;
-  if (changes.enabled) enabled = changes.enabled.newValue;
+  if (changes.enabled) {
+    enabled = changes.enabled.newValue;
+    setRulesetEnabled(enabled);
+  }
   if (changes.allowlist) allowlist = changes.allowlist.newValue || [];
 });
 
@@ -99,30 +115,41 @@ chrome.tabs.onCreated.addListener((tab) => {
   getAllowEntryForTab(tab.openerTabId, (allowEntry) => {
     const targetHost = getHostname(url);
     const allowSameSite = allowEntry && targetHost && isHostnameCoveredByEntry(targetHost, allowEntry);
-    const needsPending = allowEntry && !targetHost;
+    const needsAllowlistPending = allowEntry && !targetHost;
+    const needsAdCheck = !targetHost;
 
     if (allowSameSite) return;
 
-    if (needsPending) {
-      allowlistPending.set(tab.id, { allowEntry });
+    function setAdCheckPending() {
+      if (!needsAdCheck) return;
+      allowlistPending.set(tab.id, { allowEntry: '' });
     }
 
     // Allow user-initiated tabs even if opener is paused.
     if (consumeGestureSync(tab.openerTabId)) {
-      if (needsPending) allowlistPending.delete(tab.id);
+      setAdCheckPending();
       return;
     }
 
     // Fallback: service worker may have restarted between contextmenu and tab create.
     consumePersistedGesture(tab.openerTabId, (hasGesture) => {
       if (hasGesture) {
-        if (needsPending) allowlistPending.delete(tab.id);
+        setAdCheckPending();
         return;
       }
 
       // If the opener is paused but the target URL is unknown yet, allow the tab
       // and verify once the first URL lands.
-      if (needsPending) return;
+      if (needsAllowlistPending) {
+        allowlistPending.set(tab.id, { allowEntry });
+        return;
+      }
+
+      if (needsAdCheck) {
+        chrome.tabs.remove(tab.id, () => { chrome.runtime.lastError; });
+        recordBlock('redirects');
+        return;
+      }
 
       chrome.tabs.remove(tab.id, () => { chrome.runtime.lastError; });
       recordBlock('redirects');
@@ -145,14 +172,20 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 
   const host = getHostname(url);
-  if (isHostnameCoveredByEntry(host, pending.allowEntry)) {
+  if (!host) return;
+  if (pending.allowEntry) {
+    if (isHostnameCoveredByEntry(host, pending.allowEntry)) {
+      allowlistPending.delete(tabId);
+      return;
+    }
+
     allowlistPending.delete(tabId);
+    chrome.tabs.remove(tabId, () => { chrome.runtime.lastError; });
+    recordBlock('redirects');
     return;
   }
 
   allowlistPending.delete(tabId);
-  chrome.tabs.remove(tabId, () => { chrome.runtime.lastError; });
-  recordBlock('redirects');
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -181,27 +214,57 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'SET_ENABLED') {
     enabled = msg.value;
     chrome.storage.local.set({ enabled });
+    setRulesetEnabled(enabled);
     sendResponse({ ok: true });
   }
 
   if (msg.type === 'CLEAR_STATS') {
     stats = { popups: 0, redirects: 0, overlays: 0, ads: 0 };
     chrome.storage.local.set({ stats });
+    pendingAds = 0;
+    if (pendingAdsTimer) {
+      clearTimeout(pendingAdsTimer);
+      pendingAdsTimer = null;
+    }
     sendResponse({ ok: true });
   }
 
   return true;
 });
 
+// ─── DNR match counting ─────────────────────────────────────────────────────
+if (chrome.declarativeNetRequest?.onRuleMatchedDebug) {
+  chrome.declarativeNetRequest.onRuleMatchedDebug.addListener((info) => {
+    if (!enabled) return;
+    if (info?.rulesetId && info.rulesetId !== 'ad_rules') return;
+    queueAdsBlock();
+  });
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function recordBlock(category) {
+  recordBlockCount(category, 1);
+}
+
+function recordBlockCount(category, count) {
   if (stats[category] === undefined) stats[category] = 0;
-  stats[category]++;
+  stats[category] += count;
   chrome.storage.local.set({ stats });
 
   const total = Object.values(stats).reduce((a, b) => a + b, 0);
   chrome.action.setBadgeText({ text: total > 999 ? '999+' : String(total) });
   chrome.action.setBadgeBackgroundColor({ color: '#e63946' });
+}
+
+function queueAdsBlock() {
+  pendingAds += 1;
+  if (pendingAdsTimer) return;
+  pendingAdsTimer = setTimeout(() => {
+    const count = pendingAds;
+    pendingAds = 0;
+    pendingAdsTimer = null;
+    if (count > 0) recordBlockCount('ads', count);
+  }, DNR_FLUSH_MS);
 }
 
 function getHostname(url) {
